@@ -4,6 +4,8 @@ from firebase_admin import credentials
 from firebase_admin import firestore
 from utils import send_text, send_buttons, send_image
 from config import VERIFY_TOKEN
+import os
+import json
 
 app = Flask(__name__)
 
@@ -11,7 +13,9 @@ app = Flask(__name__)
 # FIREBASE CONNECTION
 # -------------------------
 
-cred = credentials.Certificate("firebase_key.json")
+firebase_key = json.loads(os.environ["FIREBASE_KEY"])
+cred = credentials.Certificate(firebase_key)
+
 firebase_admin.initialize_app(cred)
 
 db = firestore.client(database_id="andesdb")
