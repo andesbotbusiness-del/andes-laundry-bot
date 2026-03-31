@@ -1,29 +1,36 @@
 import requests
+import os
 from config import WHATSAPP_TOKEN, PHONE_NUMBER_ID
 
-url = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
+# 1. Prioritize Render Environment Variables, fallback to config.py
+# This ensures that even if config.py is empty, the bot uses your secure Render keys.
+TOKEN = os.environ.get("WHATSAPP_TOKEN") or WHATSAPP_TOKEN
+PNID = os.environ.get("PHONE_NUMBER_ID") or PHONE_NUMBER_ID
+
+# 2. Use the updated Meta API version
+url = f"https://graph.facebook.com/v21.0/{PNID}/messages"
 
 headers = {
-    "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+    "Authorization": f"Bearer {TOKEN}",
     "Content-Type": "application/json"
 }
 
 def send_text(phone, message):
-
     data = {
         "messaging_product": "whatsapp",
         "to": phone,
         "type": "text",
         "text": {"body": message}
     }
-
-    requests.post(url, headers=headers, json=data)
+    
+    response = requests.post(url, headers=headers, json=data)
+    # This print statement is CRUCIAL for debugging in Render logs
+    print(f"Meta Text Response: {response.status_code} - {response.text}")
+    return response.json()
 
 
 def send_buttons(phone, text, buttons):
-
     button_list = []
-
     for btn in buttons:
         button_list.append({
             "type": "reply",
@@ -46,12 +53,13 @@ def send_buttons(phone, text, buttons):
         }
     }
 
-
-    requests.post(url, headers=headers, json=data)
+    response = requests.post(url, headers=headers, json=data)
+    # This will show you if your button formatting is incorrect
+    print(f"Meta Button Response: {response.status_code} - {response.text}")
+    return response.json()
 
 
 def send_image(phone, image_url, caption=""):
-
     data = {
         "messaging_product": "whatsapp",
         "to": phone,
@@ -62,4 +70,6 @@ def send_image(phone, image_url, caption=""):
         }
     }
 
-    requests.post(url, headers=headers, json=data)
+    response = requests.post(url, headers=headers, json=data)
+    print(f"Meta Image Response: {response.status_code} - {response.text}")
+    return response.json()
