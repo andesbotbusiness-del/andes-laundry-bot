@@ -3,11 +3,12 @@ import firebase_admin  # type: ignore
 from firebase_admin import credentials, firestore  # type: ignore
 from utils import send_text, send_buttons, send_image
 from config import VERIFY_TOKEN
+from flask_cors import CORS
 import os
 import json
 
 app = Flask(__name__)
-
+CORS(app)
 # -------------------------
 # FIREBASE CONNECTION
 # -------------------------
