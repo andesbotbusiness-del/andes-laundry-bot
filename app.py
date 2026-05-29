@@ -18,7 +18,7 @@ cred = credentials.Certificate(firebase_key)
 firebase_admin.initialize_app(cred)
 
 # 1. Dashboard Database (andesdb)
-db_andes = firestore.client(database_id="andesdb")
+db_andes = firestore.client(name="projects/andesuser-792d4/databases/andesdb")
 # 2. Rider App Database (Default)
 db_default = firestore.client() 
 
