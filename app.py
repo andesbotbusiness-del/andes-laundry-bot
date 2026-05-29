@@ -2,8 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import firebase_admin
 from firebase_admin import credentials, firestore
-from utils import send_text, send_buttons, send_image
-from config import VERIFY_TOKEN
+from utils import send_text, send_buttons, send_image, send_template
 import os
 import json
 import time
@@ -25,8 +24,33 @@ db_default = firestore.client()
 
 print("\nConnected to Both Databases (andesdb & default)\n")
 
-# In-memory user state
-user_state = {}
+# State management in Firestore
+def get_user_state(phone):
+    try:
+        doc = db_andes.collection("bot_sessions").document(phone).get()
+        return doc.to_dict() if doc.exists else {}
+    except: return {}
+
+def update_user_state(phone, state):
+    try:
+        db_andes.collection("bot_sessions").document(phone).set(state)
+    except: pass
+
+def clear_user_state(phone):
+    try:
+        db_andes.collection("bot_sessions").document(phone).delete()
+    except: pass
+
+def get_user_profile(phone):
+    try:
+        doc = db_andes.collection("users").document(phone).get()
+        return doc.to_dict() if doc.exists else None
+    except: return None
+
+def update_user_profile(phone, data):
+    try:
+        db_andes.collection("users").document(phone).set(data, merge=True)
+    except: pass
 
 # -------------------------
 # HELPERS
@@ -69,9 +93,8 @@ def get_services():
 
 def save_order(phone, state):
     """Saves to andesdb (Dashboard) and default (Rider App)."""
-    # Create unique IDs
-    orders_count = sum(1 for _ in db_default.collection("cartdetails").stream())
-    order_num = 251000 + orders_count + 1
+    # Create unique IDs based on timestamp
+    order_num = int(time.time())
     now = firestore.SERVER_TIMESTAMP
     ts_ms = int(time.time() * 1000)
 
@@ -125,15 +148,21 @@ def cancel_latest_order(phone):
     """Cancels latest PENDING order in both databases."""
     # Cancel in Dashboard
     q1 = db_andes.collection("orders").where("phone", "==", phone).where("status", "==", "PENDING").stream()
+    orders_andes = list(q1)
     cancelled = False
-    for o in q1:
-        db_andes.collection("orders").document(o.id).update({"status": "CANCELLED"})
+    
+    if orders_andes:
+        latest = sorted(orders_andes, key=lambda x: x.create_time, reverse=True)[0]
+        db_andes.collection("orders").document(latest.id).update({"status": "CANCELLED"})
         cancelled = True
     
     # Cancel in Rider App
     q2 = db_default.collection("cartdetails").where("userMobile", "in", [phone, f"+{phone}"]).where("status", "==", "pending").stream()
-    for c in q2:
-        db_default.collection("cartdetails").document(c.id).update({"status": "cancelled"})
+    orders_rider = list(q2)
+    
+    if orders_rider:
+        latest_rider = sorted(orders_rider, key=lambda x: x.create_time, reverse=True)[0]
+        db_default.collection("cartdetails").document(latest_rider.id).update({"status": "cancelled"})
         cancelled = True
     
     return cancelled
@@ -169,7 +198,20 @@ def webhook():
             phone = msg["from"]
 
             # Log Incoming & Verify Bot Status
-            txt_body = msg["text"]["body"] if msg["type"] == "text" else f"[{msg['interactive']['button_reply']['title']}]"
+            if msg["type"] == "text":
+                txt_body = msg["text"]["body"]
+            elif msg["type"] == "interactive":
+                if "button_reply" in msg["interactive"]:
+                    txt_body = f"[{msg['interactive']['button_reply']['title']}]"
+                elif "list_reply" in msg["interactive"]:
+                    txt_body = f"[{msg['interactive']['list_reply']['title']}]"
+                else:
+                    txt_body = "[Interactive]"
+            else:
+                txt_body = f"[{msg['type'].upper()} MESSAGE]"
+                log_chat(phone, txt_body, "user")
+                return "ok" # Silently ignore unsupported types
+                
             log_chat(phone, txt_body, "user")
             
             if is_bot_paused(phone): 
@@ -179,30 +221,51 @@ def webhook():
             if msg["type"] == "text":
                 body = txt_body.lower().strip()
                 
-                # Main Menu
-                if any(word in body for word in ["hi", "hello", "start", "menu", "hey"]):
+                # Main Menu & Restart
+                if any(word in body for word in ["hi", "hello", "start", "menu", "hey", "cancel", "restart", "back"]):
+                    clear_user_state(phone)
+                    profile = get_user_profile(phone)
+                    greeting = f"Welcome back, {profile['name']}!" if profile and profile.get("name") else "Welcome to Andes Laundry!"
+                    
                     buttons = [
                         {"id": "schedule_order", "title": "Schedule Order"},
+                        {"id": "track_order", "title": "Track Order"},
                         {"id": "cancel_order", "title": "Cancel Order"},
                         {"id": "customer_support", "title": "Support"}
                     ]
-                    reply_buttons(phone, "Welcome to Andes Laundry\n\nHow can we help you today?", buttons)
+                    reply_buttons(phone, f"{greeting}\n\nHow can we help you today?", buttons)
                     return "ok"
 
+                state = get_user_state(phone)
+
                 # Step 1: Handling Name Typed
-                if phone in user_state and user_state[phone].get("step") == "awaiting_name":
-                    user_state[phone]["name"] = txt_body
-                    user_state[phone]["step"] = "awaiting_service"
+                if state and state.get("step") == "awaiting_name":
+                    if len(txt_body.strip()) < 2:
+                        reply_text(phone, "Please enter a valid name (at least 2 characters):")
+                        return "ok"
+                    
+                    state["name"] = txt_body.strip()
+                    state["step"] = "awaiting_service"
+                    update_user_state(phone, state)
                     
                     services = get_services()
                     buttons = [{"id": s["id"], "title": s["name"]} for s in services]
-                    reply_buttons(phone, f"Thanks {txt_body}!\n\nPlease select the service you need:", buttons)
+                    reply_buttons(phone, f"Thanks {txt_body.strip()}!\n\nPlease select the service you need:", buttons)
                     return "ok"
 
                 # Step 2: Handling Address Typed
-                if phone in user_state and user_state[phone].get("step") == "awaiting_address":
-                    user_state[phone]["address"] = txt_body
-                    user_state[phone]["step"] = "awaiting_pickup"
+                if state and state.get("step") == "awaiting_address":
+                    addr = txt_body.strip()
+                    if len(addr) < 10:
+                        reply_text(phone, "Please enter a more detailed address (at least 10 characters):")
+                        return "ok"
+                    if "pune" not in addr.lower():
+                        reply_text(phone, "We currently serve in Pune only. Please include 'Pune' in your address, or type 'cancel' to exit.")
+                        return "ok"
+                        
+                    state["address"] = addr
+                    state["step"] = "awaiting_pickup"
+                    update_user_state(phone, state)
                     
                     buttons = [
                         {"id": "today_evening", "title": "Today Evening"},
@@ -214,12 +277,47 @@ def webhook():
 
             # CASE B: BUTTON CLICK (INTERACTIVE)
             elif msg["type"] == "interactive":
-                bid = msg["interactive"]["button_reply"]["id"]
+                if "button_reply" in msg["interactive"]:
+                    bid = msg["interactive"]["button_reply"]["id"]
+                elif "list_reply" in msg["interactive"]:
+                    bid = msg["interactive"]["list_reply"]["id"]
+                else:
+                    return "ok"
+                
+                state = get_user_state(phone)
                 
                 # Start Booking
                 if bid == "schedule_order":
-                    user_state[phone] = {"step": "awaiting_name"}
-                    reply_text(phone, "Great! First, please enter your Full Name:")
+                    profile = get_user_profile(phone)
+                    if profile and profile.get("name") and profile.get("address"):
+                        update_user_state(phone, {"step": "confirm_saved_address", "profile": profile})
+                        buttons = [
+                            {"id": "use_saved_address", "title": "Yes, use saved"},
+                            {"id": "enter_new_details", "title": "No, enter new"}
+                        ]
+                        reply_buttons(phone, f"Welcome back, {profile['name']}!\n\nDo you want us to pick up from your saved address?\n📍 {profile['address']}", buttons)
+                    else:
+                        update_user_state(phone, {"step": "awaiting_name"})
+                        reply_text(phone, "Great! First, please enter your Full Name:")
+                    return "ok"
+
+                if bid == "use_saved_address":
+                    if state and state.get("step") == "confirm_saved_address":
+                        profile = state.get("profile")
+                        state["name"] = profile["name"]
+                        state["address"] = profile["address"]
+                        state["step"] = "awaiting_service"
+                        update_user_state(phone, state)
+                        
+                        services = get_services()
+                        buttons = [{"id": s["id"], "title": s["name"]} for s in services]
+                        reply_buttons(phone, "Perfect! Please select the service you need:", buttons)
+                    return "ok"
+
+                if bid == "enter_new_details":
+                    if state and state.get("step") == "confirm_saved_address":
+                        update_user_state(phone, {"step": "awaiting_name"})
+                        reply_text(phone, "No problem. Let's start fresh.\n\nPlease enter your Full Name:")
                     return "ok"
 
                 # Trigger Cancellation
@@ -229,27 +327,65 @@ def webhook():
                     else:
                         reply_text(phone, "❌ Sorry, I couldn't find any pending orders for this number.")
                     return "ok"
+                    
+                # Track Order
+                if bid == "track_order":
+                    q = db_andes.collection("orders").where("phone", "==", phone).stream()
+                    orders = list(q)
+                    if orders:
+                        latest_doc = sorted(orders, key=lambda x: x.create_time, reverse=True)[0]
+                        latest = latest_doc.to_dict()
+                        reply_text(phone, f"📦 *Order Status*\n\n🆔 Order ID: {latest.get('order_id')}\n📊 Status: *{latest.get('status', 'PENDING')}*")
+                    else:
+                        reply_text(phone, "You don't have any recent orders to track.")
+                    return "ok"
 
                 # Service Selection Clicked
                 services = get_services()
                 if bid in [s["id"] for s in services]:
-                    if phone not in user_state: user_state[phone] = {}
-                    user_state[phone]["service"] = bid
-                    user_state[phone]["step"] = "awaiting_address"
-                    reply_text(phone, "Got it. Now, please enter your full pickup address:")
+                    if not state: state = {}
+                    state["service"] = bid
+                    
+                    if state.get("address"):
+                        # Returning user using saved address
+                        state["step"] = "awaiting_pickup"
+                        update_user_state(phone, state)
+                        buttons = [
+                            {"id": "today_evening", "title": "Today Evening"},
+                            {"id": "tomorrow_morning", "title": "Tomorrow Morning"},
+                            {"id": "tomorrow_evening", "title": "Tomorrow Evening"}
+                        ]
+                        reply_buttons(phone, "Got it. When should we come for the pickup?", buttons)
+                    else:
+                        state["step"] = "awaiting_address"
+                        update_user_state(phone, state)
+                        reply_text(phone, "Got it. Now, please enter your full pickup address:")
                     return "ok"
 
                 # Pickup Time Clicked (Final Step)
                 if bid in ["today_evening", "tomorrow_morning", "tomorrow_evening"]:
-                    if phone in user_state and "service" in user_state[phone]:
-                        user_state[phone]["pickup"] = bid
-                        order_id = save_order(phone, user_state[phone])
-                        reply_text(phone, f"✅ Order Confirmed!\n\n🆔 Order ID: {order_id}\n\nOur rider will contact you soon. Thank you!")
-                        del user_state[phone]
+                    if state and "service" in state:
+                        state["pickup"] = bid
+                        order_id = save_order(phone, state)
+                        
+                        # Save to profile for next time
+                        update_user_profile(phone, {"name": state["name"], "address": state["address"]})
+                        
+                        # Use Meta WhatsApp Template 'order_placed'
+                        pickup_str = bid.replace('_', ' ').title()
+                        send_template(phone, "order_placed", variables=[state['name'], pickup_str])
+                        log_chat(phone, f"[Template Sent: order_placed]", "bot")
+                        
+                        clear_user_state(phone)
                     return "ok"
 
                 # Support
                 if bid == "customer_support":
+                    db_andes.collection("support_requests").add({
+                        "phone": phone,
+                        "status": "OPEN",
+                        "timestamp": firestore.SERVER_TIMESTAMP
+                    })
                     reply_text(phone, "Our support team has been notified and will contact you shortly.")
                     return "ok"
 
