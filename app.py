@@ -223,8 +223,47 @@ def webhook():
             if msg["type"] == "text":
                 body = txt_body.lower().strip()
                 
-                # Main Menu & Restart
-                if any(word in body for word in ["hi", "hello", "start", "menu", "hey", "cancel", "restart", "back"]):
+                # 1. SMART INTENTS (Overrides State)
+                # Cancel / Restart Intent
+                if any(word in body for word in ["cancel", "restart", "back", "reset", "abort"]):
+                    clear_user_state(phone)
+                    profile = get_user_profile(phone)
+                    greeting = f"Welcome back, {profile['name']}!" if profile and profile.get("name") else "Welcome to Andes Laundry!"
+                    buttons = [
+                        {"id": "schedule_order", "title": "Schedule Order"},
+                        {"id": "track_order", "title": "Track Order"},
+                        {"id": "cancel_order", "title": "Cancel Order"},
+                        {"id": "customer_support", "title": "Support"}
+                    ]
+                    reply_buttons(phone, f"Action cancelled. {greeting}\n\nHow can we help you today?", buttons)
+                    return "ok"
+
+                # Track Intent
+                if any(word in body for word in ["track", "status", "where"]):
+                    q = db_default.collection("cartdetails").where("userMobile", "in", [phone, f"+{phone}"]).stream()
+                    orders = list(q)
+                    if orders:
+                        latest_doc = sorted(orders, key=lambda x: x.create_time, reverse=True)[0]
+                        latest = latest_doc.to_dict()
+                        status_text = str(latest.get('status', 'PENDING')).upper()
+                        order_num = latest.get('orderNumber', 'Unknown')
+                        reply_text(phone, f"📦 *Order Status*\n\n🆔 Order ID: {order_num}\n📊 Status: *{status_text}*")
+                    else:
+                        reply_text(phone, "You don't have any recent orders to track.")
+                    return "ok"
+
+                # Support Intent
+                if any(word in body for word in ["help", "support", "agent", "human", "call"]):
+                    db_andes.collection("support_requests").add({
+                        "phone": phone,
+                        "status": "OPEN",
+                        "timestamp": firestore.SERVER_TIMESTAMP
+                    })
+                    reply_text(phone, "Our support team has been notified and will contact you shortly.")
+                    return "ok"
+
+                # Menu / Greeting Intent
+                if any(word in body for word in ["hi", "hello", "start", "menu", "hey"]):
                     clear_user_state(phone)
                     profile = get_user_profile(phone)
                     greeting = f"Welcome back, {profile['name']}!" if profile and profile.get("name") else "Welcome to Andes Laundry!"
@@ -238,6 +277,7 @@ def webhook():
                     reply_buttons(phone, f"{greeting}\n\nHow can we help you today?", buttons)
                     return "ok"
 
+                # 2. STATE HANDLING
                 state = get_user_state(phone)
 
                 # Step 1: Handling Name Typed
@@ -276,6 +316,10 @@ def webhook():
                     ]
                     reply_buttons(phone, "Nice! When should we come for the pickup?", buttons)
                     return "ok"
+                    
+                # 3. UNRECOGNIZED FALLBACK
+                reply_text(phone, "I didn't quite catch that! 🤖\n\nType *menu* to see your options, or *help* to contact our human support team.")
+                return "ok"
 
             # CASE B: BUTTON CLICK (INTERACTIVE)
             elif msg["type"] == "interactive":
@@ -330,14 +374,17 @@ def webhook():
                         reply_text(phone, "❌ Sorry, I couldn't find any pending orders for this number.")
                     return "ok"
                     
-                # Track Order
+                # Track Order (Fetches from Rider App / Website Database)
                 if bid == "track_order":
-                    q = db_andes.collection("orders").where("phone", "==", phone).stream()
+                    # Check both formats of the phone number that the app/website might save
+                    q = db_default.collection("cartdetails").where("userMobile", "in", [phone, f"+{phone}"]).stream()
                     orders = list(q)
                     if orders:
                         latest_doc = sorted(orders, key=lambda x: x.create_time, reverse=True)[0]
                         latest = latest_doc.to_dict()
-                        reply_text(phone, f"📦 *Order Status*\n\n🆔 Order ID: {latest.get('order_id')}\n📊 Status: *{latest.get('status', 'PENDING')}*")
+                        status_text = str(latest.get('status', 'PENDING')).upper()
+                        order_num = latest.get('orderNumber', 'Unknown')
+                        reply_text(phone, f"📦 *Order Status*\n\n🆔 Order ID: {order_num}\n📊 Status: *{status_text}*")
                     else:
                         reply_text(phone, "You don't have any recent orders to track.")
                     return "ok"
