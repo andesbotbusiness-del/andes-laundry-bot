@@ -1,7 +1,9 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials
+from firebase_admin import firestore as firebase_firestore
+from google.cloud import firestore
 from utils import send_text, send_buttons, send_image, send_template
 import os
 import json
@@ -18,9 +20,9 @@ cred = credentials.Certificate(firebase_key)
 firebase_admin.initialize_app(cred)
 
 # 1. Dashboard Database (andesdb)
-db_andes = firestore.client(name="projects/andesuser-792d4/databases/andesdb")
+db_andes = firestore.Client(project=firebase_key["project_id"], database="andesdb", credentials=cred.get_credential())
 # 2. Rider App Database (Default)
-db_default = firestore.client() 
+db_default = firebase_firestore.client() 
 
 print("\nConnected to Both Databases (andesdb & default)\n")
 
