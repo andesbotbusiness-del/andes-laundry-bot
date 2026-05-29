@@ -148,6 +148,17 @@ def send_manual_message():
     reply_text(data.get("phone"), data.get("message"))
     return jsonify({"status": "ok"})
 
+@app.route("/webhook", methods=["GET"])
+def webhook_verify():
+    """Verify webhook with Meta"""
+    from config import VERIFY_TOKEN
+    token = request.args.get("hub.verify_token")
+    challenge = request.args.get("hub.challenge")
+    
+    if token == VERIFY_TOKEN:
+        return challenge
+    return "Invalid token", 403
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
