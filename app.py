@@ -54,15 +54,15 @@ if GEMINI_API_KEY:
     3. Do not place the order for them, just tell them to type 'menu' to start the booking process.
     """
     
-    # Fallback chain: tries each model in order until one works (newest → oldest)
+    # FREE PLAN OPTIMIZED — based on actual API quota dashboard
+    # Only models with confirmed free quota. Ordered by RPD (highest first).
     GEMINI_MODELS = [
-        "gemini-2.5-pro",           # Latest & most powerful (2025)
-        "gemini-2.5-flash",         # Latest fast model (2025)
-        "gemini-2.0-flash",         # Stable fast model
-        "gemini-2.0-flash-lite",    # Lightweight, very fast
-        "gemini-1.5-pro",           # Previous generation pro
-        "gemini-1.5-flash",         # Previous generation flash
-        "gemini-1.0-pro",           # Oldest stable fallback
+        "gemini-3.1-flash-lite",    # 500 RPD free — BEST option for free plan
+        "gemini-2.5-flash",         # 20 RPD free — confirmed working
+        "gemini-3.5-flash",         # 20 RPD free
+        "gemini-2.5-flash-lite",    # 20 RPD free
+        "gemini-3-flash",           # 20 RPD free
+        # DO NOT USE: gemini-2.0-flash, gemini-2.0-flash-lite, gemini-2.5-pro = 0 RPD
     ]
     gemini_model = None
     
@@ -72,13 +72,12 @@ if GEMINI_API_KEY:
                 model_name=model_name,
                 system_instruction=business_context
             )
-            # Quick test to verify the model is accessible
-            candidate.generate_content("hi")
+            # No test call here - saves free quota on every server restart
             gemini_model = candidate
-            print(f"Gemini AI Initialized Successfully with model: {model_name}")
+            print(f"Gemini AI Ready: {model_name}")
             break
         except Exception as e:
-            print(f"Model '{model_name}' unavailable: {e}. Trying next...")
+            print(f"Model '{model_name}' init failed: {e}. Trying next...")
     
     if not gemini_model:
         print("WARNING: All Gemini models failed. AI Chatbot disabled.")
@@ -368,8 +367,20 @@ def webhook():
                 FALLBACK_MSG = "I didn't quite catch that! 🤖\n\nType *menu* to see your options, or *help* to contact our human support team."
                 if gemini_model:
                     try:
-                        chat_response = gemini_model.generate_content(txt_body)
-                        reply_text(phone, chat_response.text.strip())
+                        # Simple in-memory cache to avoid duplicate API calls
+                        # for identical questions (saves free quota)
+                        if not hasattr(app, '_ai_cache'):
+                            app._ai_cache = {}
+                        cache_key = txt_body.lower().strip()
+                        if cache_key in app._ai_cache:
+                            reply_text(phone, app._ai_cache[cache_key])
+                        else:
+                            chat_response = gemini_model.generate_content(txt_body)
+                            answer = chat_response.text.strip()
+                            # Cache up to 50 unique questions
+                            if len(app._ai_cache) < 50:
+                                app._ai_cache[cache_key] = answer
+                            reply_text(phone, answer)
                     except Exception as e:
                         print(f"Gemini API Error: {e}")
                         reply_text(phone, FALLBACK_MSG)
