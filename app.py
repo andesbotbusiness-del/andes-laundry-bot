@@ -54,12 +54,34 @@ if GEMINI_API_KEY:
     3. Do not place the order for them, just tell them to type 'menu' to start the booking process.
     """
     
-    # USING 'gemini-1.5-flash' - The most cost-effective, low-latency model for bots
-    gemini_model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash", 
-        system_instruction=business_context
-    )
-    print("Gemini AI Initialized Successfully!")
+    # Fallback chain: tries each model in order until one works (newest → oldest)
+    GEMINI_MODELS = [
+        "gemini-2.5-pro",           # Latest & most powerful (2025)
+        "gemini-2.5-flash",         # Latest fast model (2025)
+        "gemini-2.0-flash",         # Stable fast model
+        "gemini-2.0-flash-lite",    # Lightweight, very fast
+        "gemini-1.5-pro",           # Previous generation pro
+        "gemini-1.5-flash",         # Previous generation flash
+        "gemini-1.0-pro",           # Oldest stable fallback
+    ]
+    gemini_model = None
+    
+    for model_name in GEMINI_MODELS:
+        try:
+            candidate = genai.GenerativeModel(
+                model_name=model_name,
+                system_instruction=business_context
+            )
+            # Quick test to verify the model is accessible
+            candidate.generate_content("hi")
+            gemini_model = candidate
+            print(f"Gemini AI Initialized Successfully with model: {model_name}")
+            break
+        except Exception as e:
+            print(f"Model '{model_name}' unavailable: {e}. Trying next...")
+    
+    if not gemini_model:
+        print("WARNING: All Gemini models failed. AI Chatbot disabled.")
 else:
     gemini_model = None
     print("WARNING: Gemini API Key not found. AI Chatbot disabled.")
@@ -342,18 +364,17 @@ def webhook():
                     reply_buttons(phone, "Nice! When should we come for the pickup?", buttons)
                     return "ok"
                     
-                # 3. AI CHAT & FALLBACK (Replaced old fallback here)
+                # 3. AI CHAT & FALLBACK
+                FALLBACK_MSG = "I didn't quite catch that! 🤖\n\nType *menu* to see your options, or *help* to contact our human support team."
                 if gemini_model:
                     try:
-                        # Feed user input to the AI
                         chat_response = gemini_model.generate_content(txt_body)
                         reply_text(phone, chat_response.text.strip())
                     except Exception as e:
                         print(f"Gemini API Error: {e}")
-                        # Fallback if AI fails (e.g., rate limits)
-                        reply_text(phone, "I didn't quite catch that! 🤖\n\nType *menu* to see your options, or *help* to contact our human support team.")
+                        reply_text(phone, FALLBACK_MSG)
                 else:
-                    reply_text(phone, "I didn't quite catch that! 🤖\n\nType *menu* to see your options, or *help* to contact our human support team.")
+                    reply_text(phone, FALLBACK_MSG)
                 
                 return "ok"
 
