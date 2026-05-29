@@ -1,3 +1,4 @@
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import firebase_admin
@@ -5,6 +6,7 @@ from firebase_admin import credentials
 from firebase_admin import firestore as firebase_firestore
 from google.cloud import firestore
 from utils import send_text, send_buttons, send_image, send_template
+import google.generativeai as genai # <-- Added Gemini Import
 import os
 import json
 import time
@@ -26,7 +28,45 @@ db_default = firebase_firestore.client()
 
 print("\nConnected to Both Databases (andesdb & default)\n")
 
-# State management in Firestore
+# -------------------------
+# GEMINI AI CONNECTION & CONTEXT
+# -------------------------
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    
+    # HOW TO FEED CONTEXT: Edit this block to teach the AI about your business!
+    business_context = """
+    You are a friendly customer support AI for Andes Laundry.
+    
+    Here is your Knowledge Base to answer user questions:
+    - Service Area: We currently only serve customers in Pune.
+    - Pricing: Wash & Fold is ₹80/kg, Dry Cleaning starts at ₹150/piece, Ironing is ₹20/piece.
+    - Turnaround time: Standard delivery takes 48 hours. Express delivery is 24 hours.
+    - Booking: If a user wants to schedule an order, tell them to type 'menu' or 'start'.
+    - Tracking: If a user asks where their clothes are, tell them to type 'track'.
+    - Support: If they have a complaint, tell them to type 'support'.
+    
+    Rules for you:
+    1. Keep answers extremely short, friendly, and use WhatsApp emojis.
+    2. Never make up prices or services that are not in your Knowledge Base.
+    3. Do not place the order for them, just tell them to type 'menu' to start the booking process.
+    """
+    
+    # USING 'gemini-1.5-flash' - The most cost-effective, low-latency model for bots
+    gemini_model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash", 
+        system_instruction=business_context
+    )
+    print("Gemini AI Initialized Successfully!")
+else:
+    gemini_model = None
+    print("WARNING: Gemini API Key not found. AI Chatbot disabled.")
+
+# -------------------------
+# STATE MANAGEMENT
+# -------------------------
 def get_user_state(phone):
     try:
         doc = db_andes.collection("bot_sessions").document(phone).get()
@@ -57,7 +97,6 @@ def update_user_profile(phone, data):
 # -------------------------
 # HELPERS
 # -------------------------
-
 def is_bot_paused(phone):
     """Checks if the human operator has paused the bot for this phone."""
     try:
@@ -92,15 +131,12 @@ def get_services():
 # -------------------------
 # ORDER & SYNC LOGIC
 # -------------------------
-
 def save_order(phone, state):
     """Saves to andesdb (Dashboard) and default (Rider App)."""
-    # Create unique IDs based on timestamp
     order_num = int(time.time())
     now = firestore.SERVER_TIMESTAMP
     ts_ms = int(time.time() * 1000)
 
-    # 1. Map to Rider App Schema (cartdetails)
     cart_data = {
         "address": state["address"],
         "convenienceFee": 0,
@@ -134,7 +170,6 @@ def save_order(phone, state):
         "userName": state["name"]
     }
     
-    # 2. Save to Dashboard (andesdb)
     order_id = f"ANDES-{order_num}"
     db_andes.collection("orders").add({
         "order_id": order_id, "phone": phone, "service": state["service"],
@@ -142,13 +177,11 @@ def save_order(phone, state):
         "status": "PENDING", "created_at": now
     })
 
-    # 3. Save to Rider App (default)
     db_default.collection("cartdetails").add(cart_data)
     return order_id
 
 def cancel_latest_order(phone):
     """Cancels latest PENDING order in both databases."""
-    # Cancel in Dashboard
     q1 = db_andes.collection("orders").where("phone", "==", phone).where("status", "==", "PENDING").stream()
     orders_andes = list(q1)
     cancelled = False
@@ -158,7 +191,6 @@ def cancel_latest_order(phone):
         db_andes.collection("orders").document(latest.id).update({"status": "CANCELLED"})
         cancelled = True
     
-    # Cancel in Rider App
     q2 = db_default.collection("cartdetails").where("userMobile", "in", [phone, f"+{phone}"]).where("status", "==", "pending").stream()
     orders_rider = list(q2)
     
@@ -172,7 +204,6 @@ def cancel_latest_order(phone):
 # -------------------------
 # BOT CONTROLLER
 # -------------------------
-
 @app.route("/send", methods=["POST"])
 def send_manual_message():
     data = request.get_json()
@@ -212,7 +243,7 @@ def webhook():
             else:
                 txt_body = f"[{msg['type'].upper()} MESSAGE]"
                 log_chat(phone, txt_body, "user")
-                return "ok" # Silently ignore unsupported types
+                return "ok" 
                 
             log_chat(phone, txt_body, "user")
             
@@ -224,7 +255,6 @@ def webhook():
                 body = txt_body.lower().strip()
                 
                 # 1. SMART INTENTS (Overrides State)
-                # Cancel / Restart Intent
                 if any(word in body for word in ["cancel", "restart", "back", "reset", "abort"]):
                     clear_user_state(phone)
                     profile = get_user_profile(phone)
@@ -238,7 +268,6 @@ def webhook():
                     reply_buttons(phone, f"Action cancelled. {greeting}\n\nHow can we help you today?", buttons)
                     return "ok"
 
-                # Track Intent
                 if any(word in body for word in ["track", "status", "where"]):
                     q = db_default.collection("cartdetails").where("userMobile", "in", [phone, f"+{phone}"]).stream()
                     orders = list(q)
@@ -252,7 +281,6 @@ def webhook():
                         reply_text(phone, "You don't have any recent orders to track.")
                     return "ok"
 
-                # Support Intent
                 if any(word in body for word in ["help", "support", "agent", "human", "call"]):
                     db_andes.collection("support_requests").add({
                         "phone": phone,
@@ -262,7 +290,6 @@ def webhook():
                     reply_text(phone, "Our support team has been notified and will contact you shortly.")
                     return "ok"
 
-                # Menu / Greeting Intent
                 if any(word in body for word in ["hi", "hello", "start", "menu", "hey"]):
                     clear_user_state(phone)
                     profile = get_user_profile(phone)
@@ -280,7 +307,6 @@ def webhook():
                 # 2. STATE HANDLING
                 state = get_user_state(phone)
 
-                # Step 1: Handling Name Typed
                 if state and state.get("step") == "awaiting_name":
                     if len(txt_body.strip()) < 2:
                         reply_text(phone, "Please enter a valid name (at least 2 characters):")
@@ -295,7 +321,6 @@ def webhook():
                     reply_buttons(phone, f"Thanks {txt_body.strip()}!\n\nPlease select the service you need:", buttons)
                     return "ok"
 
-                # Step 2: Handling Address Typed
                 if state and state.get("step") == "awaiting_address":
                     addr = txt_body.strip()
                     if len(addr) < 10:
@@ -317,8 +342,19 @@ def webhook():
                     reply_buttons(phone, "Nice! When should we come for the pickup?", buttons)
                     return "ok"
                     
-                # 3. UNRECOGNIZED FALLBACK
-                reply_text(phone, "I didn't quite catch that! 🤖\n\nType *menu* to see your options, or *help* to contact our human support team.")
+                # 3. AI CHAT & FALLBACK (Replaced old fallback here)
+                if gemini_model:
+                    try:
+                        # Feed user input to the AI
+                        chat_response = gemini_model.generate_content(txt_body)
+                        reply_text(phone, chat_response.text.strip())
+                    except Exception as e:
+                        print(f"Gemini API Error: {e}")
+                        # Fallback if AI fails (e.g., rate limits)
+                        reply_text(phone, "I didn't quite catch that! 🤖\n\nType *menu* to see your options, or *help* to contact our human support team.")
+                else:
+                    reply_text(phone, "I didn't quite catch that! 🤖\n\nType *menu* to see your options, or *help* to contact our human support team.")
+                
                 return "ok"
 
             # CASE B: BUTTON CLICK (INTERACTIVE)
@@ -332,7 +368,6 @@ def webhook():
                 
                 state = get_user_state(phone)
                 
-                # Start Booking
                 if bid == "schedule_order":
                     profile = get_user_profile(phone)
                     if profile and profile.get("name") and profile.get("address"):
@@ -366,7 +401,6 @@ def webhook():
                         reply_text(phone, "No problem. Let's start fresh.\n\nPlease enter your Full Name:")
                     return "ok"
 
-                # Trigger Cancellation
                 elif bid == "cancel_order":
                     if cancel_latest_order(phone):
                         reply_text(phone, "✅ Success! Your latest pending order has been cancelled.")
@@ -374,9 +408,7 @@ def webhook():
                         reply_text(phone, "❌ Sorry, I couldn't find any pending orders for this number.")
                     return "ok"
                     
-                # Track Order (Fetches from Rider App / Website Database)
                 if bid == "track_order":
-                    # Check both formats of the phone number that the app/website might save
                     q = db_default.collection("cartdetails").where("userMobile", "in", [phone, f"+{phone}"]).stream()
                     orders = list(q)
                     if orders:
@@ -389,14 +421,12 @@ def webhook():
                         reply_text(phone, "You don't have any recent orders to track.")
                     return "ok"
 
-                # Service Selection Clicked
                 services = get_services()
                 if bid in [s["id"] for s in services]:
                     if not state: state = {}
                     state["service"] = bid
                     
                     if state.get("address"):
-                        # Returning user using saved address
                         state["step"] = "awaiting_pickup"
                         update_user_state(phone, state)
                         buttons = [
@@ -411,16 +441,13 @@ def webhook():
                         reply_text(phone, "Got it. Now, please enter your full pickup address:")
                     return "ok"
 
-                # Pickup Time Clicked (Final Step)
                 if bid in ["today_evening", "tomorrow_morning", "tomorrow_evening"]:
                     if state and "service" in state:
                         state["pickup"] = bid
                         order_id = save_order(phone, state)
                         
-                        # Save to profile for next time
                         update_user_profile(phone, {"name": state["name"], "address": state["address"]})
                         
-                        # Use Meta WhatsApp Template 'order_placed'
                         pickup_str = bid.replace('_', ' ').title()
                         send_template(phone, "order_placed", variables=[state['name'], pickup_str])
                         log_chat(phone, f"[Template Sent: order_placed]", "bot")
@@ -428,7 +455,6 @@ def webhook():
                         clear_user_state(phone)
                     return "ok"
 
-                # Support
                 if bid == "customer_support":
                     db_andes.collection("support_requests").add({
                         "phone": phone,
@@ -445,3 +471,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
