@@ -10,6 +10,9 @@ import google.generativeai as genai # <-- Added Gemini Import
 import os
 import json
 import time
+import hmac
+import hashlib
+from collections import defaultdict
 
 app = Flask(__name__)
 CORS(app)
@@ -29,6 +32,82 @@ db_default = firebase_firestore.client()
 print("\nConnected to Both Databases (andesdb & default)\n")
 
 # -------------------------
+# STARTUP VALIDATION
+# -------------------------
+REQUIRED_ENV_VARS = ["FIREBASE_KEY", "WHATSAPP_TOKEN", "PHONE_NUMBER_ID", "VERIFY_TOKEN"]
+missing = [v for v in REQUIRED_ENV_VARS if not os.environ.get(v)]
+if missing:
+    raise EnvironmentError(f"STARTUP FAILED: Missing required environment variables: {missing}")
+print("All required environment variables verified ✓")
+
+# -------------------------
+# SECURITY LAYER
+# -------------------------
+
+# 1. Per-user rate limiter (in-memory)
+_rate_limit_store = defaultdict(list)
+RATE_LIMIT_MAX = 10       # max messages per user
+RATE_LIMIT_WINDOW = 60    # per 60 seconds
+
+# Injection attempt tracker — block repeat offenders
+_injection_strikes = defaultdict(int)
+INJECTION_BLOCK_THRESHOLD = 3  # block after 3 attempts
+
+def is_rate_limited(phone):
+    """Returns True if user is sending too many messages."""
+    now = time.time()
+    _rate_limit_store[phone] = [t for t in _rate_limit_store[phone] if now - t < RATE_LIMIT_WINDOW]
+    if len(_rate_limit_store[phone]) >= RATE_LIMIT_MAX:
+        return True
+    _rate_limit_store[phone].append(now)
+    return False
+
+def mask_phone(phone):
+    """Masks phone number in logs for privacy: 919918XXXXXX"""
+    return phone[:4] + "X" * (len(phone) - 8) + phone[-4:] if len(phone) > 8 else "****"
+
+# 2. Meta Webhook Signature Verification
+def verify_webhook_signature(req):
+    """Verifies the request is genuinely from Meta using HMAC-SHA256."""
+    app_secret = os.environ.get("APP_SECRET", "")
+    if not app_secret:
+        return True  # Skip check if secret not configured (dev mode)
+    signature = req.headers.get("X-Hub-Signature-256", "")
+    if not signature:
+        return False
+    payload = req.get_data()
+    mac = hmac.new(app_secret.encode("utf-8"), payload, hashlib.sha256)
+    expected = "sha256=" + mac.hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+# 3. AI Input Sanitizer (Prompt Injection + Length Guard)
+MAX_AI_INPUT_LENGTH = 400  # chars — prevents token quota abuse
+PROMPT_INJECTION_PATTERNS = [
+    "ignore all previous", "ignore previous", "system prompt",
+    "you are now", "act as", "jailbreak", "pretend you are",
+    "forget your instructions", "new instruction", "disregard",
+    "override", "bypass", "your real instructions"
+]
+
+def sanitize_ai_input(text):
+    """Returns sanitized input or None if injection attempt detected."""
+    text = text.strip()[:MAX_AI_INPUT_LENGTH]  # Truncate long inputs
+    lower = text.lower()
+    for pattern in PROMPT_INJECTION_PATTERNS:
+        if pattern in lower:
+            return None  # Reject injection attempt
+    return text
+
+def is_injection_blocked(phone):
+    """Returns True if this user has hit the injection attempt threshold."""
+    return _injection_strikes[phone] >= INJECTION_BLOCK_THRESHOLD
+
+def record_injection_attempt(phone):
+    """Increments injection strike counter for this user."""
+    _injection_strikes[phone] += 1
+    print(f"Security: Injection strike {_injection_strikes[phone]}/{INJECTION_BLOCK_THRESHOLD} for {mask_phone(phone)}")
+
+# -------------------------
 # GEMINI AI CONNECTION & CONTEXT
 # -------------------------
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -38,20 +117,37 @@ if GEMINI_API_KEY:
     
     # HOW TO FEED CONTEXT: Edit this block to teach the AI about your business!
     business_context = """
-    You are a friendly customer support AI for Andes Laundry.
+    You are a friendly, professional, and helpful customer support AI for Andes Laundry.
     
-    Here is your Knowledge Base to answer user questions:
-    - Service Area: We currently only serve customers in Pune.
-    - Pricing: Wash & Fold is ₹80/kg, Dry Cleaning starts at ₹150/piece, Ironing is ₹20/piece.
-    - Turnaround time: Standard delivery takes 48 hours. Express delivery is 24 hours.
-    - Booking: If a user wants to schedule an order, tell them to type 'menu' or 'start'.
-    - Tracking: If a user asks where their clothes are, tell them to type 'track'.
-    - Support: If they have a complaint, tell them to type 'support'.
+    Here is your Knowledge Base. Use this to answer user questions accurately:
     
-    Rules for you:
-    1. Keep answers extremely short, friendly, and use WhatsApp emojis.
-    2. Never make up prices or services that are not in your Knowledge Base.
-    3. Do not place the order for them, just tell them to type 'menu' to start the booking process.
+    1. SERVICE AREA:
+    - We currently serve customers across Pune (including Viman Nagar, Kothrud, Hadapsar, Hinjewadi, etc.).
+    
+    2. SERVICES, PRICING, & CLOTHING TYPES:
+    - Wash & Fold (Starting from ₹59/Kg): Best for daily wear like t-shirts, shorts, track pants, pajamas, and undergarments.
+    - Wash (Wash, Tumble-Dry, Fold) (Starting from ₹69/Kg): Great for regular casual wear.
+    - Wash & Iron (Starting from ₹89/Kg): Ideal for office wear, cotton shirts, formal trousers, and kurtas.
+    - Dry Cleaning (Pricing varies): Required for winter wear (jackets, sweaters, blankets, quilts) and delicate fabrics.
+    - Andes Premium (Specialized Dry Cleaning): The perfect choice for expensive or designer wear including Suits, Blazers, Sherwanis, Silk Sarees, and Lehengas.
+    - Shoe Cleaning (Starting from ₹125/Pair): We clean sneakers, sports shoes, canvas, and leather footwear.
+    
+    3. TURNAROUND TIMES:
+    - Andes Regular: 24 to 48 hours guaranteed turnaround.
+    - Andes Instant: 3-hour express clean and delivery for urgent needs.
+    
+    4. OFFERS & FEATURES:
+    - We offer Free Pickup & Delivery right to the customer's doorstep.
+    - Customers can track their order status, ETA, and access history by downloading the 'Andes' app on the Google Play Store.
+    
+    5. SUPPORT:
+    - If a user needs human assistance or has a complex complaint, provide them with our support number: +91 86260 76578, or our support email: care@andes.co.in. You can also tell them to type 'support' to open a ticket.
+    
+    RULES FOR THE AI:
+    - Keep answers concise, conversational, and friendly. Use WhatsApp appropriate emojis (👕, 👔, 👗, ✨).
+    - If a user asks what service they need for a specific item (e.g., "What should I do with a silk saree?"), confidently recommend the correct service from the list above.
+    - NEVER make up prices, locations, or services not listed in this knowledge base.
+    - If a user wants to place an order or schedule a pickup, ALWAYS instruct them to type the word 'menu' or 'start' to trigger the automated booking system. Do not try to take their order manually.
     """
     
     # FREE PLAN OPTIMIZED — based on actual API quota dashboard
@@ -227,7 +323,14 @@ def cancel_latest_order(phone):
 # -------------------------
 @app.route("/send", methods=["POST"])
 def send_manual_message():
+    """Protected manual send endpoint — requires API_SECRET header."""
+    api_secret = os.environ.get("API_SECRET", "")
+    if api_secret and request.headers.get("X-API-Secret") != api_secret:
+        print("Security: Unauthorized access attempt on /send endpoint.")
+        return jsonify({"error": "Unauthorized"}), 401
     data = request.get_json()
+    if not data or not data.get("phone") or not data.get("message"):
+        return jsonify({"error": "Missing phone or message"}), 400
     reply_text(data.get("phone"), data.get("message"))
     return jsonify({"status": "ok"})
 
@@ -244,6 +347,11 @@ def webhook_verify():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    # SECURITY CHECK 1: Verify request is from Meta
+    if not verify_webhook_signature(request):
+        print("Security: Rejected webhook with invalid signature.")
+        return "Forbidden", 403
+
     data = request.get_json()
     try:
         val = data["entry"][0]["changes"][0]["value"]
@@ -268,6 +376,16 @@ def webhook():
                 
             log_chat(phone, txt_body, "user")
             
+            # SECURITY CHECK 2: Per-user rate limiting
+            if is_rate_limited(phone):
+                print(f"Security: Rate limit hit for {mask_phone(phone)}")
+                return "ok"  # Silently ignore — don't tell attacker they're blocked
+
+            # SECURITY CHECK 2b: Block repeat injection offenders entirely
+            if is_injection_blocked(phone):
+                print(f"Security: Blocked repeat offender {mask_phone(phone)}")
+                return "ok"
+
             if is_bot_paused(phone): 
                 return "ok"
 
@@ -367,17 +485,27 @@ def webhook():
                 FALLBACK_MSG = "I didn't quite catch that! 🤖\n\nType *menu* to see your options, or *help* to contact our human support team."
                 if gemini_model:
                     try:
+                        # SECURITY CHECK 3: Sanitize input (injection + length)
+                        safe_input = sanitize_ai_input(txt_body)
+                        if not safe_input:
+                            record_injection_attempt(phone)
+                            if is_injection_blocked(phone):
+                                # Permanently silenced after 3 strikes
+                                print(f"Security: User {mask_phone(phone)} permanently blocked for injection.")
+                            else:
+                                reply_text(phone, "⚠️ I can't process that message. Type *menu* to continue.")
+                            return "ok"
+
                         # Simple in-memory cache to avoid duplicate API calls
-                        # for identical questions (saves free quota)
                         if not hasattr(app, '_ai_cache'):
                             app._ai_cache = {}
-                        cache_key = txt_body.lower().strip()
+                        cache_key = safe_input.lower()
                         if cache_key in app._ai_cache:
                             reply_text(phone, app._ai_cache[cache_key])
                         else:
-                            chat_response = gemini_model.generate_content(txt_body)
-                            answer = chat_response.text.strip()
-                            # Cache up to 50 unique questions
+                            chat_response = gemini_model.generate_content(safe_input)
+                            # SECURITY CHECK 4: Limit AI response length
+                            answer = chat_response.text.strip()[:1000]
                             if len(app._ai_cache) < 50:
                                 app._ai_cache[cache_key] = answer
                             reply_text(phone, answer)
@@ -433,7 +561,7 @@ def webhook():
                         reply_text(phone, "No problem. Let's start fresh.\n\nPlease enter your Full Name:")
                     return "ok"
 
-                elif bid == "cancel_order":
+                if bid == "cancel_order":
                     if cancel_latest_order(phone):
                         reply_text(phone, "✅ Success! Your latest pending order has been cancelled.")
                     else:
