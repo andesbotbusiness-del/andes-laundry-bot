@@ -53,6 +53,27 @@ RATE_LIMIT_WINDOW = 60    # per 60 seconds
 _injection_strikes = defaultdict(int)
 INJECTION_BLOCK_THRESHOLD = 3  # block after 3 attempts
 
+# -------------------------
+# DUPLICATE MESSAGE GUARD
+# -------------------------
+# Meta retries the webhook if it doesn't get a fast 200 OK.
+# We deduplicate on the WhatsApp message ID to prevent the bot
+# from sending the same reply 2-3 times.
+_processed_msg_ids = {}          # { msg_id: timestamp }
+DUPLICATE_TTL = 60               # seconds — discard cache entries older than this
+
+def is_duplicate_message(msg_id):
+    """Returns True if this message ID was already processed recently."""
+    now = time.time()
+    # Evict stale entries to prevent unbounded memory growth
+    expired = [k for k, t in _processed_msg_ids.items() if now - t > DUPLICATE_TTL]
+    for k in expired:
+        del _processed_msg_ids[k]
+    if msg_id in _processed_msg_ids:
+        return True  # Already handled — this is a retry
+    _processed_msg_ids[msg_id] = now
+    return False
+
 def is_rate_limited(phone):
     """Returns True if user is sending too many messages."""
     now = time.time()
@@ -358,6 +379,13 @@ def webhook():
         if "messages" in val:
             msg = val["messages"][0]
             phone = msg["from"]
+            msg_id = msg.get("id", "")
+
+            # DEDUPLICATION GUARD: Meta retries webhooks on slow/failed responses.
+            # If we've already processed this exact message ID, drop the retry silently.
+            if is_duplicate_message(msg_id):
+                print(f"Dedup: Skipping already-processed message {msg_id} for {mask_phone(phone)}")
+                return "ok"
 
             # Log Incoming & Verify Bot Status
             if msg["type"] == "text":
@@ -415,9 +443,22 @@ def webhook():
                         latest = latest_doc.to_dict()
                         status_text = str(latest.get('status', 'PENDING')).upper()
                         order_num = latest.get('orderNumber', 'Unknown')
-                        reply_text(phone, f"📦 *Order Status*\n\n🆔 Order ID: {order_num}\n📊 Status: *{status_text}*")
+                        service_raw = list(latest.get('services', {}).keys())
+                        service_display = service_raw[0].replace('_', ' ').title() if service_raw else 'N/A'
+                        pickup_time = latest.get('paymentData', {}).get('pickupTime', 'N/A').replace('_', ' ').title()
+                        drop_time = latest.get('dropTime', '')
+                        expected_delivery = drop_time if (drop_time and drop_time != 'standard') else "Within 24–48 hours of pickup"
+                        reply_text(phone,
+                            f"📦 *Order Status*\n\n"
+                            f"🆔 Order ID: *{order_num}*\n"
+                            f"🧺 Service: *{service_display}*\n"
+                            f"📊 Status: *{status_text}*\n"
+                            f"📅 Pickup Time: *{pickup_time}*\n"
+                            f"🚚 Expected Delivery: *{expected_delivery}*\n\n"
+                            f"For assistance, contact Andes Support: 📞 *+91 86260 76578*"
+                        )
                     else:
-                        reply_text(phone, "You don't have any recent orders to track.")
+                        reply_text(phone, "📭 You don't have any recent orders to track.\n\nType *menu* to schedule a new pickup!")
                     return "ok"
 
                 if any(word in body for word in ["help", "support", "agent", "human", "call"]):
@@ -426,7 +467,13 @@ def webhook():
                         "status": "OPEN",
                         "timestamp": firestore.SERVER_TIMESTAMP
                     })
-                    reply_text(phone, "Our support team has been notified and will contact you shortly.")
+                    reply_text(phone,
+                        "💬 *Support Request Received*\n\n"
+                        "Our support team has been notified and will contact you shortly.\n\n"
+                        "For immediate assistance, you can also reach us at:\n"
+                        "📞 *+91 86260 76578*\n"
+                        "📧 care@andes.co.in"
+                    )
                     return "ok"
 
                 if any(word in body for word in ["hi", "hello", "start", "menu", "hey"]):
@@ -452,12 +499,9 @@ def webhook():
                         return "ok"
                     
                     state["name"] = txt_body.strip()
-                    state["step"] = "awaiting_service"
+                    state["step"] = "awaiting_address"   # NEW ORDER: ask address next
                     update_user_state(phone, state)
-                    
-                    services = get_services()
-                    buttons = [{"id": s["id"], "title": s["name"]} for s in services]
-                    reply_buttons(phone, f"Thanks {txt_body.strip()}!\n\nPlease select the service you need:", buttons)
+                    reply_text(phone, f"Thanks, {txt_body.strip()}! 😊\n\nNow please share your full *Pickup Address* (include Pune):")
                     return "ok"
 
                 if state and state.get("step") == "awaiting_address":
@@ -466,19 +510,30 @@ def webhook():
                         reply_text(phone, "Please enter a more detailed address (at least 10 characters):")
                         return "ok"
                     if "pune" not in addr.lower():
-                        reply_text(phone, "We currently serve in Pune only. Please include 'Pune' in your address, or type 'cancel' to exit.")
+                        reply_text(phone, "⚠️ We currently serve in Pune only. Please include 'Pune' in your address, or type *cancel* to exit.")
                         return "ok"
                         
                     state["address"] = addr
-                    state["step"] = "awaiting_pickup"
+                    state["step"] = "awaiting_service"   # NEW ORDER: service comes after address
                     update_user_state(phone, state)
                     
-                    buttons = [
-                        {"id": "today_evening", "title": "Today Evening"},
-                        {"id": "tomorrow_morning", "title": "Tomorrow Morning"},
-                        {"id": "tomorrow_evening", "title": "Tomorrow Evening"}
-                    ]
-                    reply_buttons(phone, "Nice! When should we come for the pickup?", buttons)
+                    services = get_services()
+                    buttons = [{"id": s["id"], "title": s["name"]} for s in services]
+                    reply_buttons(phone, "Got your address! 📍\n\nPlease select the *service* you need:", buttons)
+                    return "ok"
+
+                # Cancel Order — awaiting YES confirmation
+                if state and state.get("step") == "awaiting_cancel_confirm":
+                    if txt_body.strip().lower() == "yes":
+                        if cancel_latest_order(phone):
+                            order_id = state.get("pending_order_id", "your order")
+                            reply_text(phone, f"✅ Your order *{order_id}* has been successfully cancelled.\n\nType *menu* if you need anything else.")
+                        else:
+                            reply_text(phone, "❌ Sorry, we couldn't find a pending order to cancel. It may have already been processed.")
+                        clear_user_state(phone)
+                    else:
+                        reply_text(phone, "Cancellation not confirmed. Your order is *still active*. ✅\n\nType *menu* to go back to the main menu.")
+                        clear_user_state(phone)
                     return "ok"
                     
                 # 3. AI CHAT & FALLBACK
@@ -536,10 +591,10 @@ def webhook():
                             {"id": "use_saved_address", "title": "Yes, use saved"},
                             {"id": "enter_new_details", "title": "No, enter new"}
                         ]
-                        reply_buttons(phone, f"Welcome back, {profile['name']}!\n\nDo you want us to pick up from your saved address?\n📍 {profile['address']}", buttons)
+                        reply_buttons(phone, f"Welcome back, {profile['name']}! 👋\n\nShall we pick up from your saved address?\n📍 {profile['address']}", buttons)
                     else:
                         update_user_state(phone, {"step": "awaiting_name"})
-                        reply_text(phone, "Great! First, please enter your Full Name:")
+                        reply_text(phone, "📦 *Schedule a Pickup*\n\nPlease share your *Full Name* to get started:")
                     return "ok"
 
                 if bid == "use_saved_address":
@@ -547,25 +602,44 @@ def webhook():
                         profile = state.get("profile")
                         state["name"] = profile["name"]
                         state["address"] = profile["address"]
-                        state["step"] = "awaiting_service"
+                        state["step"] = "awaiting_service"   # address already known, go straight to service
                         update_user_state(phone, state)
                         
                         services = get_services()
                         buttons = [{"id": s["id"], "title": s["name"]} for s in services]
-                        reply_buttons(phone, "Perfect! Please select the service you need:", buttons)
+                        reply_buttons(phone, "Perfect! 🎉\n\nPlease select the *service* you need:", buttons)
                     return "ok"
 
                 if bid == "enter_new_details":
                     if state and state.get("step") == "confirm_saved_address":
                         update_user_state(phone, {"step": "awaiting_name"})
-                        reply_text(phone, "No problem. Let's start fresh.\n\nPlease enter your Full Name:")
+                        reply_text(phone, "No problem! Let's start fresh. 😊\n\nPlease share your *Full Name*:")
                     return "ok"
 
                 if bid == "cancel_order":
-                    if cancel_latest_order(phone):
-                        reply_text(phone, "✅ Success! Your latest pending order has been cancelled.")
+                    # NEW FLOW: Show order details first, ask for YES confirmation
+                    q = db_default.collection("cartdetails").where("userMobile", "in", [phone, f"+{phone}"]).where("status", "==", "pending").stream()
+                    pending_orders = list(q)
+                    if pending_orders:
+                        latest_doc = sorted(pending_orders, key=lambda x: x.create_time, reverse=True)[0]
+                        latest = latest_doc.to_dict()
+                        order_num = latest.get('orderNumber', 'Unknown')
+                        service_raw = list(latest.get('services', {}).keys())
+                        service_display = service_raw[0].replace('_', ' ').title() if service_raw else 'N/A'
+                        pickup_time = latest.get('paymentData', {}).get('pickupTime', 'N/A').replace('_', ' ').title()
+
+                        update_user_state(phone, {"step": "awaiting_cancel_confirm", "pending_order_id": str(order_num)})
+                        reply_text(phone,
+                            f"❌ *Cancel Order*\n\n"
+                            f"🆔 Order ID: *{order_num}*\n"
+                            f"🧺 Service: *{service_display}*\n"
+                            f"📅 Pickup: *{pickup_time}*\n"
+                            f"📊 Status: *Pending*\n\n"
+                            f"To cancel this order, please reply *YES*.\n"
+                            f"Reply anything else to keep your order."
+                        )
                     else:
-                        reply_text(phone, "❌ Sorry, I couldn't find any pending orders for this number.")
+                        reply_text(phone, "❌ You don't have any pending orders to cancel.")
                     return "ok"
                     
                 if bid == "track_order":
@@ -576,29 +650,44 @@ def webhook():
                         latest = latest_doc.to_dict()
                         status_text = str(latest.get('status', 'PENDING')).upper()
                         order_num = latest.get('orderNumber', 'Unknown')
-                        reply_text(phone, f"📦 *Order Status*\n\n🆔 Order ID: {order_num}\n📊 Status: *{status_text}*")
+                        # Service name
+                        service_raw = list(latest.get('services', {}).keys())
+                        service_display = service_raw[0].replace('_', ' ').title() if service_raw else 'N/A'
+                        # Pickup time
+                        pickup_time = latest.get('paymentData', {}).get('pickupTime', 'N/A').replace('_', ' ').title()
+                        # Expected delivery (drop_time field or estimated from status)
+                        drop_time = latest.get('dropTime', '')
+                        if drop_time and drop_time != 'standard':
+                            expected_delivery = drop_time
+                        else:
+                            expected_delivery = "Within 24–48 hours of pickup"
+                        reply_text(phone,
+                            f"📦 *Order Status*\n\n"
+                            f"🆔 Order ID: *{order_num}*\n"
+                            f"🧺 Service: *{service_display}*\n"
+                            f"📊 Status: *{status_text}*\n"
+                            f"📅 Pickup Time: *{pickup_time}*\n"
+                            f"🚚 Expected Delivery: *{expected_delivery}*\n\n"
+                            f"For assistance, contact Andes Support: 📞 *+91 86260 76578*"
+                        )
                     else:
-                        reply_text(phone, "You don't have any recent orders to track.")
+                        reply_text(phone, "📭 You don't have any recent orders to track.\n\nType *menu* to schedule a new pickup!")
                     return "ok"
 
                 services = get_services()
                 if bid in [s["id"] for s in services]:
                     if not state: state = {}
                     state["service"] = bid
-                    
-                    if state.get("address"):
-                        state["step"] = "awaiting_pickup"
-                        update_user_state(phone, state)
-                        buttons = [
-                            {"id": "today_evening", "title": "Today Evening"},
-                            {"id": "tomorrow_morning", "title": "Tomorrow Morning"},
-                            {"id": "tomorrow_evening", "title": "Tomorrow Evening"}
-                        ]
-                        reply_buttons(phone, "Got it. When should we come for the pickup?", buttons)
-                    else:
-                        state["step"] = "awaiting_address"
-                        update_user_state(phone, state)
-                        reply_text(phone, "Got it. Now, please enter your full pickup address:")
+                    # Address is always collected before service in the new flow,
+                    # so it should already be in state. Go straight to pickup time.
+                    state["step"] = "awaiting_pickup"
+                    update_user_state(phone, state)
+                    buttons = [
+                        {"id": "today_evening", "title": "Today Evening"},
+                        {"id": "tomorrow_morning", "title": "Tomorrow Morning"},
+                        {"id": "tomorrow_evening", "title": "Tomorrow Evening"}
+                    ]
+                    reply_buttons(phone, "Got it! 🧺\n\nWhen should we come for the *pickup*?", buttons)
                     return "ok"
 
                 if bid in ["today_evening", "tomorrow_morning", "tomorrow_evening"]:
@@ -621,7 +710,13 @@ def webhook():
                         "status": "OPEN",
                         "timestamp": firestore.SERVER_TIMESTAMP
                     })
-                    reply_text(phone, "Our support team has been notified and will contact you shortly.")
+                    reply_text(phone,
+                        "💬 *Support Request Received*\n\n"
+                        "Our support team has been notified and will contact you shortly.\n\n"
+                        "For immediate assistance, you can also reach us at:\n"
+                        "📞 *+91 86260 76578*\n"
+                        "📧 care@andes.co.in"
+                    )
                     return "ok"
 
     except Exception as e:
