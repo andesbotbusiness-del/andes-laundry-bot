@@ -13,6 +13,7 @@ import time
 import hmac
 import hashlib
 import threading
+import re
 from collections import defaultdict
 
 app = Flask(__name__)
@@ -638,7 +639,7 @@ def process_message(data):
                 body = txt_body.lower().strip()
 
                 # 1. SMART INTENTS (Overrides State)
-                if any(word in body for word in ["cancel", "restart", "back", "reset", "abort"]):
+                if re.search(r'\b(cancel|restart|back|reset|abort)\b', body):
                     clear_user_state(phone)
                     profile = get_user_profile(phone)
                     greeting = f"Welcome back, {profile['name']}!" if profile and profile.get("name") else "Welcome to Andes Laundry!"
@@ -651,7 +652,7 @@ def process_message(data):
                     reply_buttons(phone, f"Action cancelled. {greeting}\n\nHow can we help you today?", buttons)
                     return "ok"
 
-                if any(word in body for word in ["track", "status", "where"]):
+                if re.search(r'\b(track|status|where)\b', body):
                     q = db_default.collection("cartdetails").where("userMobile", "in", [phone, f"+{phone}"]).stream()
                     orders = list(q)
                     if orders:
@@ -677,7 +678,7 @@ def process_message(data):
                         reply_text(phone, f"{E_NOMAIL} You don't have any recent orders to track.\n\nType *menu* to schedule a new pickup!")
                     return "ok"
 
-                if any(word in body for word in ["help", "support", "agent", "human", "call"]):
+                if re.search(r'\b(help|support|agent|human|call)\b', body):
                     db_andes.collection("support_requests").add({
                         "phone": phone,
                         "status": "OPEN",
@@ -692,7 +693,7 @@ def process_message(data):
                     )
                     return "ok"
 
-                if any(word in body for word in ["hi", "hello", "start", "menu", "hey"]):
+                if re.search(r'\b(hi|hello|start|menu|hey)\b', body):
                     clear_user_state(phone)
                     profile = get_user_profile(phone)
                     greeting = f"Welcome back, {profile['name']}!" if profile and profile.get("name") else "Welcome to Andes Laundry!"
