@@ -619,14 +619,18 @@ def process_message(data):
             else:
                 txt_body = f"[{msg['type'].upper()} MESSAGE]"
                 log_chat(phone, txt_body, "user")
+                reply_text(phone, f"{E_WARN} Sorry, I am a bot and I can only read *text messages* right now. Please type out your request!")
                 return "ok"
 
             log_chat(phone, txt_body, "user")
 
             # SECURITY CHECK 2: Per-user rate limiting
             if is_rate_limited(phone):
+                # Only send the warning once when they exactly hit the limit, stay silent if they keep spamming.
+                if len(_rate_limit_store[phone]) == RATE_LIMIT_MAX:
+                    reply_text(phone, f"{E_WARN} You're sending messages too fast! Please wait a minute before messaging again.")
                 print(f"Security: Rate limit hit for {mask_phone(phone)}")
-                return "ok"  # Silently ignore -- don't tell attacker they're blocked
+                return "ok"
 
             # SECURITY CHECK 2b: Block repeat injection offenders entirely
             if is_injection_blocked(phone):
@@ -695,7 +699,11 @@ def process_message(data):
                     )
                     return "ok"
 
-                if re.search(r'\b(hi|hello|start|menu|hey)\b', body):
+                if re.search(r'\b(thanks|thank you|thx|tysm|ok|okay|cool|awesome|great)\b', body):
+                    reply_text(phone, f"You're welcome! {E_SMILE} Let us know if you need anything else.\n\nType *menu* anytime to schedule a pickup.")
+                    return "ok"
+
+                if re.search(r'\b(hi|hello|start|menu|hey|order|book|schedule)\b', body):
                     clear_user_state(phone)
                     profile = get_user_profile(phone)
                     greeting = f"Welcome back, {profile['name']}!" if profile and profile.get("name") else "Welcome to Andes Laundry!"
