@@ -514,6 +514,8 @@ ITEM_PRICE_MAP = [
     (["shirt pant", "shirt & pant", "shirt and pant"], "Shirt & Pant Combo (Dry Cleaning)",  "Rs.49/set",         E_FORMAL),
     (["jeans", "denim"],                            "Jeans (Dry Cleaning)",                   "Rs.59/piece",       E_PANTS),
     (["top"],                                        "Top (Dry Cleaning)",                    "Rs.49/piece",       E_TSHIRT),
+    (["shirt", "tshirt", "t-shirt"],                 "Shirt",                                 "Wash & Iron (Rs.89/kg) or Combo (Rs.49/set)", E_SHIRT),
+    (["pant", "pants"],                              "Pant",                                  "Trouser (Rs.49) or Combo (Rs.49/set)", E_PANTS),
     (["joggers", "jogger"],                         "Joggers (Dry Cleaning)",                 "Rs.149/piece",      E_SHOE),
     (["skirt"],                                      "Skirt (Dry Cleaning)",                  "Rs.49/piece",       E_DRESS),
     # Home Furnishings
@@ -788,7 +790,7 @@ def process_message(data):
                 # Item-specific lookup first, then full menu for general pricing queries.
                 matched_item = None
                 for keywords, label, price, emoji in ITEM_PRICE_MAP:
-                    if any(kw in body for kw in keywords):
+                    if any(re.search(rf'\b{re.escape(kw)}s?\b', body) for kw in keywords):
                         matched_item = (label, price, emoji)
                         break
 
@@ -802,8 +804,8 @@ def process_message(data):
                     )
                     return "ok"
 
-                elif any(kw in body for kw in PRICE_INTENT_KEYWORDS):
-                    # General price inquiry -- show the full categorised menu
+                elif any(kw in body.split() for kw in PRICE_INTENT_KEYWORDS) and len(body.split()) <= 3:
+                    # General price inquiry (short queries like "price list" or "rates") -- show full menu
                     reply_text(phone,
                         f"{E_MONEY} *Andes Laundry -- Pricing*\n\n"
                         "*Standard Services*\n"
