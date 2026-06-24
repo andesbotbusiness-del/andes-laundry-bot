@@ -549,10 +549,23 @@ def send_manual_message():
     if api_secret and request.headers.get("X-API-Secret") != api_secret:
         print("Security: Unauthorized access attempt on /send endpoint.")
         return jsonify({"error": "Unauthorized"}), 401
+        
     data = request.get_json()
     if not data or not data.get("phone") or not data.get("message"):
         return jsonify({"error": "Missing phone or message"}), 400
-    reply_text(data.get("phone"), data.get("message"))
+        
+    phone = data.get("phone")
+    message = data.get("message")
+    image_url = data.get("imageUrl") # Extract the new optional image URL
+    if image_url:
+        # Send the image via WhatsApp with the message as its caption
+        send_image(phone, image_url, caption=message)
+        # Log the image message to the chat history
+        log_chat(phone, f"[Image Attached]\n{message}", "bot")
+    else:
+        # Standard text message
+        reply_text(phone, message)
+        
     return jsonify({"status": "ok"})
 
 @app.route("/webhook", methods=["GET"])
