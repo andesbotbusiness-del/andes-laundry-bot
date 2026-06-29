@@ -78,7 +78,7 @@ print("\nConnected to Both Databases (andesdb & default)\n")
 # -------------------------
 # STARTUP VALIDATION
 # -------------------------
-REQUIRED_ENV_VARS = ["FIREBASE_KEY", "WHATSAPP_TOKEN", "PHONE_NUMBER_ID", "VERIFY_TOKEN"]
+REQUIRED_ENV_VARS = ["FIREBASE_KEY", "WHATSAPP_TOKEN", "SUPPORT_PHONE_ID", "MARKETING_PHONE_ID", "VERIFY_TOKEN"]
 missing = [v for v in REQUIRED_ENV_VARS if not os.environ.get(v)]
 if missing:
     raise EnvironmentError(f"STARTUP FAILED: Missing required environment variables: {missing}")
