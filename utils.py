@@ -1,21 +1,22 @@
 import requests
 import os
-from config import WHATSAPP_TOKEN, PHONE_NUMBER_ID
+from config import WHATSAPP_TOKEN
 
 # 1. Prioritize Render Environment Variables, fallback to config.py
 # This ensures that even if config.py is empty, the bot uses your secure Render keys.
 TOKEN = os.environ.get("WHATSAPP_TOKEN") or WHATSAPP_TOKEN
-PNID = os.environ.get("PHONE_NUMBER_ID") or PHONE_NUMBER_ID
 
-# 2. Use the updated Meta API version
-url = f"https://graph.facebook.com/v21.0/{PNID}/messages"
+# 2. Use the updated Meta API version dynamically
+def get_whatsapp_url(sender_phone_id):
+    return f"https://graph.facebook.com/v21.0/{sender_phone_id}/messages"
 
 headers = {
     "Authorization": f"Bearer {TOKEN}",
     "Content-Type": "application/json"
 }
 
-def send_text(phone, message):
+def send_text(phone, message, sender_phone_id):
+    url = get_whatsapp_url(sender_phone_id)
     data = {
         "messaging_product": "whatsapp",
         "to": phone,
@@ -29,7 +30,8 @@ def send_text(phone, message):
     return response.json()
 
 
-def send_buttons(phone, text, buttons):
+def send_buttons(phone, text, buttons, sender_phone_id):
+    url = get_whatsapp_url(sender_phone_id)
     if len(buttons) > 3:
         rows = []
         for btn in buttons:
@@ -86,7 +88,8 @@ def send_buttons(phone, text, buttons):
     return response.json()
 
 
-def send_image(phone, image_url, caption=""):
+def send_image(phone, image_url, sender_phone_id, caption=""):
+    url = get_whatsapp_url(sender_phone_id)
     data = {
         "messaging_product": "whatsapp",
         "to": phone,
@@ -101,7 +104,8 @@ def send_image(phone, image_url, caption=""):
     print(f"Meta Image Response: {response.status_code} - {response.text}")
     return response.json()
 
-def send_template(phone, template_name, variables=None, lang_code="en"):
+def send_template(phone, template_name, sender_phone_id, variables=None, lang_code="en"):
+    url = get_whatsapp_url(sender_phone_id)
     components = []
     if variables:
         parameters = [{"type": "text", "text": str(v)} for v in variables]
@@ -125,4 +129,22 @@ def send_template(phone, template_name, variables=None, lang_code="en"):
     
     response = requests.post(url, headers=headers, json=data, timeout=10)
     print(f"Meta Template Response: {response.status_code} - {response.text}")
+    return response.json()
+
+def send_marketing_template(to_number, template_name, sender_phone_id):
+    url = get_whatsapp_url(sender_phone_id)
+    data = {
+        "messaging_product": "whatsapp",
+        "to": to_number,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {
+                "code": "en"
+            }
+        }
+    }
+    
+    response = requests.post(url, headers=headers, json=data, timeout=10)
+    print(f"Meta Marketing Template Response: {response.status_code} - {response.text}")
     return response.json()

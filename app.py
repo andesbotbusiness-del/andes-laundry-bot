@@ -371,31 +371,38 @@ def is_bot_paused(phone):
     _bot_paused_cache[phone] = (result, now)
     return result
 
-def _log_chat_worker(phone, message_text, sender):
+def _log_chat_worker(phone, message_text, sender, channel="support"):
     """Background worker that writes a chat log entry to Firestore."""
     try:
         db_andes.collection("chat_history").add({
             "phone": phone,
             "message": message_text,
             "sender": sender,
+            "channel": channel,
             "timestamp": firestore.SERVER_TIMESTAMP
         })
     except: pass
 
-def log_chat(phone, message_text, sender):
+def log_chat(phone, message_text, sender, channel="support"):
     """Logs conversation to andesdb for the dashboard.
     Runs in a daemon thread -- never blocks the reply path.
     """
-    t = threading.Thread(target=_log_chat_worker, args=(phone, message_text, sender), daemon=True)
+    t = threading.Thread(target=_log_chat_worker, args=(phone, message_text, sender, channel), daemon=True)
     t.start()
 
-def reply_text(phone, text):
-    send_text(phone, text)
-    log_chat(phone, text, "bot")
+def reply_text(phone, text, sender_phone_id=None, channel="support"):
+    if not sender_phone_id:
+        from config import SUPPORT_PHONE_ID
+        sender_phone_id = SUPPORT_PHONE_ID
+    send_text(phone, text, sender_phone_id)
+    log_chat(phone, text, "bot", channel)
 
-def reply_buttons(phone, text, buttons):
-    send_buttons(phone, text, buttons)
-    log_chat(phone, text, "bot")
+def reply_buttons(phone, text, buttons, sender_phone_id=None, channel="support"):
+    if not sender_phone_id:
+        from config import SUPPORT_PHONE_ID
+        sender_phone_id = SUPPORT_PHONE_ID
+    send_buttons(phone, text, buttons, sender_phone_id)
+    log_chat(phone, text, "bot", channel)
 
 def get_services():
     """Fetches laundry services from andesdb."""
@@ -558,8 +565,9 @@ def send_manual_message():
     message = data.get("message")
     image_url = data.get("imageUrl") # Extract the new optional image URL
     if image_url:
+        from config import SUPPORT_PHONE_ID
         # Send the image via WhatsApp with the message as its caption
-        send_image(phone, image_url, caption=message)
+        send_image(phone, image_url, SUPPORT_PHONE_ID, caption=message)
         # Log the image message to the chat history
         log_chat(phone, f"[Image Attached]\n{message}", "bot")
     else:
@@ -619,6 +627,30 @@ def process_message(data):
             msg = val["messages"][0]
             phone = msg["from"]
             msg_id = msg.get("id", "")
+            
+            sender_phone_id = val["metadata"]["phone_number_id"]
+            from config import MARKETING_PHONE_ID
+            if sender_phone_id == MARKETING_PHONE_ID:
+                if msg["type"] == "text":
+                    txt_body = msg["text"]["body"]
+                elif msg["type"] == "interactive":
+                    if "button_reply" in msg["interactive"]:
+                        txt_body = f"[{msg['interactive']['button_reply']['title']}]"
+                    elif "list_reply" in msg["interactive"]:
+                        txt_body = f"[{msg['interactive']['list_reply']['title']}]"
+                    else:
+                        txt_body = "[Interactive]"
+                else:
+                    txt_body = f"[{msg['type'].upper()} MESSAGE]"
+                
+                log_chat(phone, txt_body, "user", channel="marketing")
+                
+                auto_reply = "👋 Hi! This number is only used for updates and offers.\n\nFor support, order placement, or to chat with our team, please message our main support number here: https://wa.me/918626076578"
+                from utils import send_text
+                send_text(phone, auto_reply, sender_phone_id)
+                log_chat(phone, auto_reply, "bot", channel="marketing")
+                return "ok"
+
             # Log Incoming & Verify Bot Status
             if msg["type"] == "text":
                 txt_body = msg["text"]["body"]
@@ -1000,6 +1032,24 @@ def process_message(data):
 
     except Exception as e:
         print("Bot Error:", e)
+
+@app.route("/api/marketing/broadcast", methods=["POST"])
+def broadcast_marketing():
+    """Endpoint for React frontend to trigger marketing template messages."""
+    data = request.get_json()
+    if not data or not data.get("phone"):
+        return jsonify({"error": "Missing phone number"}), 400
+        
+    phone = data.get("phone")
+    template_name = data.get("template_name", "fo_new_customers")
+    
+    try:
+        from config import MARKETING_PHONE_ID
+        from utils import send_marketing_template
+        response = send_marketing_template(phone, template_name, MARKETING_PHONE_ID)
+        return jsonify({"status": "ok", "response": response})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
